@@ -25,6 +25,7 @@
 #include "MinHook.h"
 #include "ol_interact.h"
 #include "ol_motion.h"
+#include "ol_xr.h"
 
 extern "C" void OLProxyLog(const char* line);
 
@@ -58,34 +59,34 @@ static const ActionWord kActions[] = {
 enum Gate { G_ALWAYS, G_DOORS, G_RAISE, G_BATTERY, G_DUCK, G_HOLSTER, G_HOLSTER_BATTERY, G_CLIMB };
 struct Sentence { Gate gate; const wchar_t* game; const wchar_t* quest; };
 static const Sentence kSentences[] = {
-    { G_DOORS, L"Press or hold {OLA_Use} to open", L"Grab the handle to open, or press X" },
-    { G_DOORS, L"Press {OLA_Use} to open",         L"Grab the handle to open, or press X" },
-    { G_DOORS, L"Press {OLA_Use} to close",        L"Grab the handle to close, or press X" },
+    { G_DOORS, L"Press or hold {OLA_Use} to open", L"Grab the handle to open, or press {OLA_Use}" },
+    { G_DOORS, L"Press {OLA_Use} to open",         L"Grab the handle to open, or press {OLA_Use}" },
+    { G_DOORS, L"Press {OLA_Use} to close",        L"Grab the handle to close, or press {OLA_Use}" },
     { G_DOORS, L"To open a door quickly, press {OLA_Use}. To open a door slowly, hold down {OLA_Use} and move forward or backward.",
-               L"To open a door, grab its handle and push or pull it. X still opens it in one go." },
+               L"To open a door, grab its handle and push or pull it. {OLA_Use} still opens it in one go." },
     // (Test38) the chest holster and the hands-on reload come first; without them, Test37's wording
     { G_HOLSTER, L"To raise your camcorder, press {OLA_ToggleCamcorder}",
                  L"Your camcorder is on your right hip: take it with your right hand and bring it to your eye" },
     { G_HOLSTER_BATTERY, L"Press {OLA_Reload} to reload batteries",
-                 L"To reload, pull the old battery out of the camcorder, take a new one from your left hip and slide it in, or press Y" },
+                 L"To reload, pull the old battery out of the camcorder, take a new one from your left hip and slide it in, or press {OLA_Reload}" },
     { G_HOLSTER_BATTERY, L"Batteries are used for the infrared light of your camcorder. You can reload by pressing {OLA_Reload}",
-                 L"Batteries are used for the infrared light of your camcorder. To reload, pull the old one out of the camcorder with your left hand, take a new one from your left hip and slide it in, or press Y" },
+                 L"Batteries are used for the infrared light of your camcorder. To reload, pull the old one out of the camcorder with your left hand, take a new one from your left hip and slide it in, or press {OLA_Reload}" },
     { G_RAISE, L"To raise your camcorder, press {OLA_ToggleCamcorder}",
                L"To raise your camcorder, lift your right hand to your eye, or squeeze the right grip" },
     { G_BATTERY, L"Press {OLA_Reload} to reload batteries",
-                 L"To reload, take a battery from your left hip to the camcorder, or press Y" },
+                 L"To reload, take a battery from your left hip to the camcorder, or press {OLA_Reload}" },
     { G_BATTERY, L"Batteries are used for the infrared light of your camcorder. You can reload by pressing {OLA_Reload}",
-                 L"Batteries are used for the infrared light of your camcorder. To reload, take one from your left hip and bring it to your right hand, or press Y" },
-    { G_DUCK, L"Crouch or uncrouch with {OLA_CrouchToggle}", L"Duck down to crouch and stand up to stand, or press B" },
+                 L"Batteries are used for the infrared light of your camcorder. To reload, take one from your left hip and bring it to your right hand, or press {OLA_Reload}" },
+    { G_DUCK, L"Crouch or uncrouch with {OLA_CrouchToggle}", L"Duck down to crouch and stand up to stand, or press {OLA_CrouchToggle}" },
     // (Test40) climbing with your hands
     { G_CLIMB, L"To climb up, press {OLA_Jump}",
-               L"To climb up, grab the edge with both hands and pull yourself up (or press A)" },
+               L"To climb up, grab the edge with both hands and pull yourself up (or press {OLA_Jump})" },
     { G_CLIMB, L"To climb up, press {OLA_Jump}. To drop, press {OLA_CrouchToggle}",
-               L"To climb up, hold on with both grips and pull down. To drop, let go with both hands (or press B)" },
+               L"To climb up, hold on with both grips and pull down. To drop, let go with both hands (or press {OLA_CrouchToggle})" },
     { G_CLIMB, L"To jump up, press {OLA_Jump}",
-               L"To jump up, reach up at the edge with both hands, squeeze and pull (or press A)" },
+               L"To jump up, reach up at the edge with both hands, squeeze and pull (or press {OLA_Jump})" },
     { G_CLIMB, L"To vault, press {OLA_Jump} while moving towards waist-high objects.",
-               L"To vault, put both hands on a waist-high edge, squeeze and push down (or press A while moving towards it)" },
+               L"To vault, put both hands on a waist-high edge, squeeze and push down (or press {OLA_Jump} while moving towards it)" },
     { G_ALWAYS, L"With the camcorder active, you can zoom in and out with {OLA_ZoomContinuousIn} and {OLA_ZoomContinuousOut}",
                 L"With the camcorder raised, push the right stick up to zoom in and down to zoom out" },
 };
@@ -124,13 +125,14 @@ static bool AfterVerb(const wchar_t* s, size_t at) {
 }
 // Returns true when the text changed (out then holds the new text).
 static bool Rewrite(const wchar_t* s, size_t len, wchar_t* out, size_t cap) {
+    bool changed = false;
     for (const Sentence& st : kSentences) {
         if (wcslen(st.game) == len && wcsncmp(s, st.game, len) == 0 && GateOn(st.gate)) {
-            size_t n = 0;
-            return Put(out, cap, &n, st.quest, wcslen(st.quest));
+            s = st.quest; len = wcslen(s); changed = true;
+            break;
         }
     }
-    bool changed = false; size_t n = 0; out[0] = 0;
+    size_t n = 0; out[0] = 0;
     for (size_t i = 0; i < len;) {
         if (s[i] == L'{' && i + 5 <= len && wcsncmp(s + i, L"{OLA_", 5) == 0) {
             size_t j = i + 5;
@@ -139,7 +141,21 @@ static bool Rewrite(const wchar_t* s, size_t len, wchar_t* out, size_t cap) {
                 const wchar_t* name = s + i + 5; const size_t nl = j - (i + 5);
                 const wchar_t* quest = nullptr;
                 for (const ActionWord& a : kActions)
-                    if (wcslen(a.action) == nl && wcsncmp(name, a.action, nl) == 0) { quest = a.quest; break; }
+                    if (wcslen(a.action) == nl && wcsncmp(name, a.action, nl) == 0) { quest = a.quest;
+                        if (OLXR_UsesIndex(0)) {
+                            if (!wcscmp(a.action, L"Use")) quest = L"left A";
+                            else if (!wcscmp(a.action, L"Reload")) quest = L"left B";
+                            else if (!wcscmp(a.action, L"ShowRecordingMenu")) quest = L"left grip + left A";
+                            else if (!wcscmp(a.action, L"ShowEvidenceMenu")) quest = L"left grip + left B";
+                            else if (!wcscmp(a.action, L"ShowMenu")) quest = L"the left trackpad";
+                        }
+                        if (OLXR_UsesIndex(1)) {
+                            if (!wcscmp(a.quest, L"A")) quest = L"right A";
+                            else if (!wcscmp(a.quest, L"B")) quest = L"right B";
+                            else if (!wcscmp(a.action, L"ShowTabMenu")) quest = L"left grip + right B";
+                        }
+                        break;
+                    }
                 if (quest) {
                     const bool bare = AfterVerb(s, i);
                     if (!bare && !Put(out, cap, &n, L"(", 1)) return false;
@@ -199,7 +215,7 @@ extern "C" void OLPrompts_Install(uintptr_t base) {
     if (!same) {
         sprintf_s(line, "[OLVR][PROMPTS] hint resolver prologue MISMATCH at %p - the game's own button icons stay", fn);
     } else if (MH_CreateHook(fn, (void*)&Hook_Resolve, (void**)&o_Resolve) == MH_OK && MH_EnableHook(fn) == MH_OK) {
-        sprintf_s(line, "[OLVR][PROMPTS] hint resolver hooked at base+0x%llX: hints name the Quest 3 controls (%s)",
+        sprintf_s(line, "[OLVR][PROMPTS] hint resolver hooked at base+0x%llX: hints name the active controller buttons (%s)",
                   (unsigned long long)kResolveRva, OLInteract_Get(5) ? "on" : "off");
     } else {
         sprintf_s(line, "[OLVR][PROMPTS] hint resolver hook FAILED at %p", fn);

@@ -2947,15 +2947,6 @@ namespace Outlast1VR
 
         void DrawCredit(Graphics g, double t, double ua)
         {
-            double a = ua * U.Smooth(1.95, 2.4, t); if (a < 0.01) return;
-            int x = 58, y = 616;
-            if (logo != null)
-            {
-                DrawImageA(g, logo, x, y, a);
-                pen.Width = 1.5f; pen.Color = U.A(Color.FromArgb(150, 130, 230, 145), a); g.DrawEllipse(pen, x - 1, y - 1, logo.Width + 1, logo.Height + 1);
-            }
-            int tx = logo != null ? x + logo.Width + 16 : x;
-            Text(g, "VR mod made by StrikeZoneVR", fCredit, U.A(Color.FromArgb(240, 222, 244, 222), a), tx, y + 20, true);
         }
 
         // ---------------- camcorder OSD ----------------

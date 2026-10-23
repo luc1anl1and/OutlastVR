@@ -46,6 +46,9 @@ struct OLXrPad {
     unsigned handValid;        // bit 0 = left, bit 1 = right
     OLXrPose aimPose[2];       // [LOOKUSE] where each controller POINTS (aim pose), same frame
     unsigned aimValid;
+    unsigned indexHands;       // active Valve Index interaction profile, bit per hand
+    float fingerCurl[2][5];    // thumb, index, middle, ring, little: 0 open .. 1 closed
+    unsigned fingerValid[2];   // bit per finger; invalid data retains the native animation
 };
 enum {
     OLXR_BTN_A = 1u << 0, OLXR_BTN_B = 1u << 1, OLXR_BTN_X = 1u << 2, OLXR_BTN_Y = 1u << 3,
@@ -53,6 +56,7 @@ enum {
 };
 extern "C" int OLXR_MotionControlsReady();
 extern "C" int OLXR_GetPad(OLXrPad* out);      // 1 = out filled with a coherent one-frame snapshot
+extern "C" int OLXR_UsesIndex(int hand);      // cached profile; never calls OpenXR on game thread
 extern "C" long OLXR_RecenterGeneration();     // increments after each completed XR recenter
 
 // [HANDSYNC] Both hands and the RAW (unclamped) head position, located at the SAME predicted

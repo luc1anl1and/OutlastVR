@@ -223,6 +223,16 @@ struct XrHapticVibration { XrStructureType type; const void* next; XrDuration du
 // (Test48) which controller layout the runtime bound for a hand
 struct XrInteractionProfileState { XrStructureType type; void* next; XrPath interactionProfile; };
 
+// Optional XR_EXT_hand_tracking ABI, verified against Khronos openxr.h.
+using XrHandTrackerEXT = uint64_t;
+struct XrHandTrackerCreateInfoEXT { XrStructureType type; const void* next; int32_t hand; int32_t handJointSet; };
+struct XrHandJointsLocateInfoEXT { XrStructureType type; const void* next; XrSpace baseSpace; XrTime time; };
+struct XrHandJointLocationEXT { XrSpaceLocationFlags locationFlags; XrPosef pose; float radius; };
+struct XrHandJointLocationsEXT { XrStructureType type; void* next; XrBool32 isActive; uint32_t jointCount; XrHandJointLocationEXT* jointLocations; };
+using PFN_xrCreateHandTrackerEXT = XrResult (OL_XRAPI *)(XrSession, const XrHandTrackerCreateInfoEXT*, XrHandTrackerEXT*);
+using PFN_xrDestroyHandTrackerEXT = XrResult (OL_XRAPI *)(XrHandTrackerEXT);
+using PFN_xrLocateHandJointsEXT = XrResult (OL_XRAPI *)(XrHandTrackerEXT, const XrHandJointsLocateInfoEXT*, XrHandJointLocationsEXT*);
+
 // ---- function-pointer typedefs -----------------------------------------------------------
 using PFN_xrGetInstanceProcAddr = XrResult (OL_XRAPI *)(XrInstance, const char*, PFN_xrVoidFunction*);
 using PFN_xrEnumerateInstanceExtensionProperties = XrResult (OL_XRAPI *)(const char*, uint32_t, uint32_t*, XrExtensionProperties*);

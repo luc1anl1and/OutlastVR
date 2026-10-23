@@ -18,6 +18,7 @@
 
 #include "ol_xr_types.h"
 #include "ol_xr.h"
+#include "ol_index_input.h"
 #include <d3d9.h>
 #include <d3d11.h>
 #include <d3d11_4.h>
@@ -450,8 +451,22 @@ static XrActionSet g_actionSet = 0;
 static XrAction g_aMove = 0, g_aLook = 0, g_aTrig = 0, g_aGrip = 0, g_aPose = 0, g_aAim = 0;
 static XrAction g_aClick = 0, g_aPrimary = 0, g_aSecondary = 0, g_aMenu = 0;
 static XrAction g_aHaptic = 0;   // [HAPTICS] vibration output, both hands
+static XrAction g_aIndexMenuPressure = 0;
+static bool g_indexMenuHeld = false;
 static XrAction g_aStickTouch = 0;   // (Test48) [STICKCENTER] thumb on the stick (Touch / Index / Vive pad), optional
 static XrPath   g_handPath[2] = { 0, 0 };
+static volatile LONG g_indexHands = 0;
+static bool g_indexGrab[2] = {};
+static float g_indexClose = 0.80f, g_indexOpen = 0.55f;
+static long g_fingerTracking = 1;
+static bool g_handTrackingExt = false;
+static XrHandTrackerEXT g_fingerTracker[2] = {};
+static PFN_xrCreateHandTrackerEXT g_createHandTracker = nullptr;
+static PFN_xrDestroyHandTrackerEXT g_destroyHandTracker = nullptr;
+static PFN_xrLocateHandJointsEXT g_locateHandJoints = nullptr;
+extern "C" int OLXR_UsesIndex(int hand) {
+    return hand >= 0 && hand < 2 && (InterlockedCompareExchange(&g_indexHands, 0, 0) & (1 << hand)) ? 1 : 0;
+}
 static XrSpace  g_handSpace[2] = { 0, 0 };
 static XrSpace  g_aimSpace[2]  = { 0, 0 };
 
@@ -542,6 +557,9 @@ static void LogInteractionProfiles(const char* why) {
             uint32_t n = 0;
             if (!XrSucceeded(g_fn.pathToString(g_instance, st.interactionProfile, (uint32_t)sizeof(name), &n, name))) strcpy_s(name, "?");
         } else if (!XrSucceeded(r)) sprintf_s(name, "unknown (r=%d)", r);
+        const LONG bit = 1 << i;
+        if (!strcmp(name, "/interaction_profiles/valve/index_controller")) InterlockedOr(&g_indexHands, bit);
+        else InterlockedAnd(&g_indexHands, ~bit);
         if (!strcmp(name, s_last[i]) && strcmp(why, "first input") != 0) continue;
         strcpy_s(s_last[i], name);
         XLOG("[OLVR][XRINPUT] %s: %s hand uses %s", why, i ? "right" : "left", name);
@@ -597,6 +615,7 @@ static void BuildActionSet() {
     if (!mk(g_aHaptic, XR_ACTION_TYPE_VIBRATION_OUTPUT_VALUE, "rumble", "Rumble")) g_aHaptic = 0;
     // (Test48) [STICKCENTER] optional the same way: refused, only the stick-drift fix is lost.
     if (!mk(g_aStickTouch, XR_ACTION_TYPE_BOOLEAN_INPUT_VALUE, "sticktouch", "Thumbstick Touch")) g_aStickTouch = 0;
+    if (!mk(g_aIndexMenuPressure, XR_ACTION_TYPE_FLOAT_INPUT_VALUE, "indexmenupressure", "Index Pause Trackpad")) g_aIndexMenuPressure = 0;
 
     struct Bind { XrAction a; const char* path; };
     auto suggest = [&](const char* profile, const Bind* b, int n) {
@@ -642,7 +661,9 @@ static void BuildActionSet() {
         { g_aGrip, "/user/hand/left/input/squeeze/value" }, { g_aGrip, "/user/hand/right/input/squeeze/value" },
         { g_aPrimary,   "/user/hand/left/input/a/click" }, { g_aPrimary,   "/user/hand/right/input/a/click" },
         { g_aSecondary, "/user/hand/left/input/b/click" }, { g_aSecondary, "/user/hand/right/input/b/click" },
-        { g_aMenu, "/user/hand/left/input/system/click" },
+        // Index has no application Menu button. The pressure-sensitive left pad is pause;
+        // left grip + pad opens VR settings through the existing menu chord.
+        { g_aIndexMenuPressure, "/user/hand/left/input/trackpad/force" },
         { g_aHaptic, "/user/hand/left/output/haptic" }, { g_aHaptic, "/user/hand/right/output/haptic" },
         { g_aStickTouch, "/user/hand/left/input/thumbstick/touch" }, { g_aStickTouch, "/user/hand/right/input/thumbstick/touch" },
     };
@@ -922,6 +943,41 @@ static void DevFakeHands(OLXrPose hand[2], unsigned* valid, XrTime t) {
 
 // Sync + publish. WORKER THREAD ONLY, once per xrWaitFrame. The whole struct is built locally
 // and copied under the lock in one go, so the game thread can never see a half-updated pad.
+static void ReadFingerCurls(OLXrPad& p, XrTime displayTime) {
+    if (!g_handTrackingExt || !g_locateHandJoints || !g_localSpace) return;
+    // Each chain starts at its proximal joint (thumb: metacarpal), ending at the tip.
+    const int first[5] = { 2, 7, 12, 17, 22 };
+    for (int h = 0; h < 2; ++h) {
+        if (!(p.indexHands & (1u << h)) || !g_fingerTracker[h] || !(p.handValid & (1u << h))) continue;
+        XrHandJointLocationEXT joints[26] = {};
+        XrHandJointsLocateInfoEXT li = {}; li.type = 1000051002;
+        li.baseSpace = g_localSpace; li.time = displayTime;
+        XrHandJointLocationsEXT loc = {}; loc.type = 1000051003;
+        loc.jointCount = 26; loc.jointLocations = joints;
+        if (!XrSucceeded(g_locateHandJoints(g_fingerTracker[h], &li, &loc)) || !loc.isActive) continue;
+        for (int f = 0; f < 5; ++f) {
+            float points[4][3]; bool valid = true;
+            for (int j = 0; j < 4; ++j) {
+                const auto& joint = joints[first[f] + j];
+                if (!(joint.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT_VALUE)) valid = false;
+                points[j][0] = joint.pose.position.x; points[j][1] = joint.pose.position.y; points[j][2] = joint.pose.position.z;
+            }
+            if (!valid) continue;
+            const float a = OLFingerBend(points[0], points[1], points[2]);
+            const float b = OLFingerBend(points[1], points[2], points[3]);
+            if (a < 0 || b < 0) continue;
+            const float curl = (a + b) / (f == 0 ? 1.8f : 2.6f);
+            p.fingerCurl[h][f] = curl > 1 ? 1 : curl;
+            p.fingerValid[h] |= 1u << f;
+        }
+        static bool logged[2] = {};
+        if (p.fingerValid[h] && !logged[h]) {
+            logged[h] = true;
+            XLOG("[OLVR][INDEX] %s finger animation active (runtime joint data)", h ? "right" : "left");
+        }
+    }
+}
+
 static void SyncInput(XrTime displayTime) {
     if (!g_inputReady || !g_fn.syncActions) return;
     XrActiveActionSet aas = {}; aas.actionSet = g_actionSet; aas.subactionPath = XR_NULL_PATH_VALUE;
@@ -930,9 +986,20 @@ static void SyncInput(XrTime displayTime) {
     const XrResult r = g_fn.syncActions(g_session, &si);
     // XR_SESSION_NOT_FOCUSED is normal and frequent (dashboard up, app in the background) - it
     // is not an error, it just means every action reads inactive this frame.
-    if (!XrSucceeded(r)) return;
+    if (r != XR_SUCCESS_VALUE) {
+        // Focus loss and failed sync must release controls rather than publish a stale grab.
+        g_indexGrab[0] = g_indexGrab[1] = g_indexMenuHeld = false;
+        AcquireSRWLockExclusive(&g_pubLock);
+        g_padPub = {}; g_padPubValid = 1;
+        ReleaseSRWLockExclusive(&g_pubLock);
+        return;
+    }
 
     OLXrPad p = {};
+    // Query the current profile on first sync too, before interpreting the first grip sample.
+    static bool profilesRead = false;
+    if (!profilesRead) { LogInteractionProfiles("first sync"); profilesRead = true; }
+    p.indexHands = (unsigned)InterlockedCompareExchange(&g_indexHands, 0, 0);
     ReadStick(g_aMove, 0, &p.moveX, &p.moveY);
     ReadStick(g_aLook, 1, &p.lookX, &p.lookY);
     // (Test48) [STICKCENTER] raw values first, for the log below
@@ -941,6 +1008,11 @@ static void SyncInput(XrTime displayTime) {
     StickCenter(1, &p.lookX, &p.lookY);
     p.trigL = ReadFloat(g_aTrig, 0); p.trigR = ReadFloat(g_aTrig, 1);
     p.gripL = ReadFloat(g_aGrip, 0); p.gripR = ReadFloat(g_aGrip, 1);
+    float* grip[2] = { &p.gripL, &p.gripR };
+    for (int h = 0; h < 2; ++h) {
+        if (p.indexHands & (1u << h)) *grip[h] = OLIndexGrab(*grip[h], g_indexGrab[h], g_indexClose, g_indexOpen);
+        else g_indexGrab[h] = false;
+    }
     if (ReadBool(g_aPrimary,   0)) p.buttons |= OLXR_BTN_X;   // left primary  = X
     if (ReadBool(g_aSecondary, 0)) p.buttons |= OLXR_BTN_Y;   // left secondary= Y
     if (ReadBool(g_aPrimary,   1)) p.buttons |= OLXR_BTN_A;   // right primary = A
@@ -948,6 +1020,9 @@ static void SyncInput(XrTime displayTime) {
     if (ReadBool(g_aClick, 0)) p.buttons |= OLXR_BTN_LSTICK;
     if (ReadBool(g_aClick, 1)) p.buttons |= OLXR_BTN_RSTICK;
     if (ReadBool(g_aMenu, 0) || ReadBool(g_aMenu, 1)) p.buttons |= OLXR_BTN_MENU;
+    if ((p.indexHands & 1u) && g_aIndexMenuPressure) {
+        if (OLIndexGrab(ReadFloat(g_aIndexMenuPressure, 0), g_indexMenuHeld, 0.55f, 0.35f)) p.buttons |= OLXR_BTN_MENU;
+    } else g_indexMenuHeld = false;
 
     // Both stick clicks recenter from the VR controllers. Swallow the two game buttons while the
     // chord is held so recentering cannot also toggle night vision or trigger a debug binding.
@@ -1024,6 +1099,7 @@ static void SyncInput(XrTime displayTime) {
         if (GetTickCount64() < g_devStickUntil) { p.moveX = g_devStick[0]; p.moveY = g_devStick[1]; p.lookX = g_devStick[2]; p.lookY = g_devStick[3]; }
     }
 
+    ReadFingerCurls(p, displayTime);
     AcquireSRWLockExclusive(&g_pubLock);
     g_padPub = p; g_padPubValid = 1;
     ReleaseSRWLockExclusive(&g_pubLock);
@@ -1425,6 +1501,15 @@ static bool Init(UINT w, UINT h) {
                 // (measured true of Oculus/Quest Link), off for the ones the single-centre-pose
                 // model was tuned against (VDXR, SteamVR). 0/1 force it either way.
                 g_inputEnabled = GetPrivateProfileIntW(L"Input", L"MotionControls", 1, ini) ? 1 : 0;
+                g_fingerTracking = GetPrivateProfileIntW(L"Input", L"IndexFingerTracking", 1, ini) ? 1 : 0;
+                { wchar_t value[32];
+                  GetPrivateProfileStringW(L"Input", L"IndexGrabClose", L"0.80", value, 32, ini);
+                  const float closeAt = (float)_wtof(value);
+                  if (closeAt >= 0.1f && closeAt <= 1.0f) g_indexClose = closeAt;
+                  GetPrivateProfileStringW(L"Input", L"IndexGrabOpen", L"0.55", value, 32, ini);
+                  const float openAt = (float)_wtof(value);
+                  g_indexOpen = (openAt >= 0 && openAt < g_indexClose) ? openAt : g_indexClose * 0.65f;
+                }
                 g_hapticsOn = GetPrivateProfileIntW(L"Input", L"Haptics", 1, ini) ? 1 : 0;
                 // (Test48) [STICKCENTER]
                 g_stickAutoCenter = GetPrivateProfileIntW(L"Input", L"StickAutoCenter", 1, ini) ? 1 : 0;
@@ -1523,9 +1608,9 @@ static bool Init(UINT w, UINT h) {
     if (!XrSucceeded(g_getProc(0, "xrCreateInstance", &createFn)) || !createFn) { XLOG("[OLVR][XR] no xrCreateInstance"); g_dead = true; return false; }
     // [THEATER] Ask for the cylinder layer only if the runtime lists it, so the curved screen can
     // never cost a session: without it the theater uses a flat quad.
-    const char* exts[2] = { kD3D11ExtensionName, nullptr };
+    const char* exts[3] = { kD3D11ExtensionName, nullptr, nullptr };
     uint32_t extCount = 1;
-    if (g_thCurved) {
+    if (g_thCurved || (g_inputEnabled && g_fingerTracking)) {
         PFN_xrVoidFunction ef = nullptr;
         if (XrSucceeded(g_getProc(0, "xrEnumerateInstanceExtensionProperties", &ef)) && ef) {
             auto enumExt = (PFN_xrEnumerateInstanceExtensionProperties)ef;
@@ -1534,11 +1619,14 @@ static bool Init(UINT w, UINT h) {
                 std::vector<XrExtensionProperties> props(n);
                 for (auto& p : props) { p = {}; p.type = XR_TYPE_EXTENSION_PROPERTIES_VALUE; }
                 if (XrSucceeded(enumExt(nullptr, n, &n, props.data())))
-                    for (uint32_t i = 0; i < n; ++i)
-                        if (!strcmp(props[i].extensionName, kCylinderExtensionName)) g_cylinderExt = true;
+                    for (uint32_t i = 0; i < n; ++i) {
+                        if (g_thCurved && !strcmp(props[i].extensionName, kCylinderExtensionName)) g_cylinderExt = true;
+                        if (g_inputEnabled && g_fingerTracking && !strcmp(props[i].extensionName, "XR_EXT_hand_tracking")) g_handTrackingExt = true;
+                    }
             }
         }
         if (g_cylinderExt) exts[extCount++] = kCylinderExtensionName;
+        if (g_handTrackingExt) exts[extCount++] = "XR_EXT_hand_tracking";
         XLOG("[OLVR][THEATER] cylinder layers %s", g_cylinderExt ? "available - curved screen" : "not offered by this runtime - flat screen");
     }
     XrInstanceCreateInfo ici = {}; ici.type = XR_TYPE_INSTANCE_CREATE_INFO_VALUE;
@@ -1550,12 +1638,22 @@ static bool Init(UINT w, UINT h) {
     ici.enabledExtensionCount = extCount; ici.enabledExtensionNames = exts;
     XrResult r = ((PFN_xrCreateInstance)createFn)(&ici, &g_instance);
     if (!XrSucceeded(r) && extCount > 1) {   // belt and braces: never lose the session to the curve
-        XLOG("[OLVR][THEATER] xrCreateInstance r=%d with the cylinder extension - retrying without it", r);
-        g_cylinderExt = false; ici.enabledExtensionCount = 1;
+        XLOG("[OLVR][THEATER] xrCreateInstance r=%d with optional extensions - retrying with D3D11 only", r);
+        g_cylinderExt = false; g_handTrackingExt = false; ici.enabledExtensionCount = 1;
         r = ((PFN_xrCreateInstance)createFn)(&ici, &g_instance);
     }
     if (!XrSucceeded(r)) { XLOG("[OLVR][XR] xrCreateInstance r=%d (no runtime?)", r); g_dead = true; return false; }
     XLOG("[OLVR][XR] instance created");
+    if (g_handTrackingExt) {
+        PFN_xrVoidFunction fn = nullptr;
+        if (XrSucceeded(g_getProc(g_instance, "xrCreateHandTrackerEXT", &fn))) g_createHandTracker = (PFN_xrCreateHandTrackerEXT)fn;
+        fn = nullptr;
+        if (XrSucceeded(g_getProc(g_instance, "xrDestroyHandTrackerEXT", &fn))) g_destroyHandTracker = (PFN_xrDestroyHandTrackerEXT)fn;
+        fn = nullptr;
+        if (XrSucceeded(g_getProc(g_instance, "xrLocateHandJointsEXT", &fn))) g_locateHandJoints = (PFN_xrLocateHandJointsEXT)fn;
+        if (!g_createHandTracker || !g_destroyHandTracker || !g_locateHandJoints) g_handTrackingExt = false;
+    }
+    XLOG("[OLVR][INDEX] optional finger tracking %s", g_handTrackingExt ? "available" : "unavailable - native finger poses");
 
     RES("xrDestroyInstance", destroyInstance); RES("xrPollEvent", pollEvent);
     RES("xrGetInstanceProperties", getInstanceProperties);
@@ -1668,6 +1766,16 @@ static bool Init(UINT w, UINT h) {
     // frame runs. xrAttachSessionActionSets is one-shot per session and every action must already
     // exist when it is called, so there is no later opportunity.
     BuildActionSet();
+    if (g_handTrackingExt && g_inputReady) {
+        for (int h = 0; h < 2; ++h) {
+            XrHandTrackerCreateInfoEXT ci = {}; ci.type = 1000051001;
+            ci.hand = h + 1; ci.handJointSet = 0;
+            const XrResult hr = g_createHandTracker(g_session, &ci, &g_fingerTracker[h]);
+            if (!XrSucceeded(hr)) g_fingerTracker[h] = 0;
+            XLOG("[OLVR][INDEX] %s finger tracker r=%d%s", h ? "right" : "left", hr,
+                 g_fingerTracker[h] ? "" : " - native finger poses");
+        }
+    }
 
     XrSwapchainCreateInfo scci = {}; scci.type = XR_TYPE_SWAPCHAIN_CREATE_INFO_VALUE;
     scci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT_VALUE | XR_SWAPCHAIN_USAGE_SAMPLED_BIT_VALUE;
@@ -5488,6 +5596,10 @@ void OLXR_Shutdown() {
         CloseHandle(g_workerThread); g_workerThread = nullptr;
         g_dead = true;              // stops the worker at its next loop check
         return;
+    }
+    for (int h = 0; h < 2; ++h) {
+        if (g_fingerTracker[h] && g_destroyHandTracker) g_destroyHandTracker(g_fingerTracker[h]);
+        g_fingerTracker[h] = 0;
     }
     if (g_session) { if (g_running) g_fn.endSession(g_session); g_fn.destroySession(g_session); g_session = 0; }
     if (g_sysSurf) { g_sysSurf->Release(); g_sysSurf = nullptr; }

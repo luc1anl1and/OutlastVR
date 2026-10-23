@@ -726,9 +726,9 @@ static void BuildUI() {
           "Rings for every grab zone: knobs (green open, red locked, yellow in reach),\n"
           "the hip pouch (orange), the raise-to-eye spot (cyan)."); }
     { bool b = OLInteract_Get(5) != 0;
-      if (ImGui::Checkbox("Hints name the Quest controls", &b)) OLInteract_Set(5, b);
+      if (ImGui::Checkbox("Hints name your controller buttons", &b)) OLInteract_Set(5, b);
       Help(
-          "The game's hints say what to do on Quest 3 controllers instead of showing\n"
+          "The game's hints name the active controller buttons (including Valve Index) instead of showing\n"
           "Xbox buttons: \"Grab the handle to open, or press X\", \"hold down the left grip\"."); }
             ImGui::EndChild();
             ImGui::EndTabItem();

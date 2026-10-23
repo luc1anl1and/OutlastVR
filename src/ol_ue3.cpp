@@ -3921,6 +3921,35 @@ static void GripFingers(IkArray& space, void* mesh, int h, float w) {
     for (int i = 0; i < space.n && i < 73; ++i) if (sub[i]) space.d[i] = IkCompose(space.d[PoseParent(mesh, i)], loc[i]);
 }
 
+// Retarget runtime finger curls to Miles's existing three-joint chains. Object grips and
+// authored scenes retain priority; never write wrist/auxiliary bones or change bone lengths.
+static void TrackedFingers(IkArray& space, void* mesh, int h, const OLXrPad& pad, float weight) {
+    if (!g_poseRefValid || !pad.fingerValid[h] || !(pad.indexHands & (1u << h))) return;
+    const int wrist = g_poseBone[h][2];
+    if (wrist < 0 || wrist + 15 >= space.n || wrist + 15 >= 73) return;
+    const float fingerDegrees[3] = { 65, 85, 60 };
+    const float thumbDegrees[3] = { 10, 40, 50 };
+    for (int f = 0; f < 5; ++f) {
+        if (!(pad.fingerValid[h] & (1u << f))) continue;
+        // Capture locals before composing the chain, so the live parent is never mixed
+        // with the previous frame's child when applying the blend.
+        IkAtom local[3]; bool valid = true;
+        for (int j = 0; j < 3; ++j) {
+            const int bone = wrist + 1 + f * 3 + j, parent = PoseParent(mesh, bone);
+            if (parent != (j ? bone - 1 : wrist)) { valid = false; break; }
+            local[j] = IkLocalOf(space, bone, parent);
+        }
+        if (!valid) continue;
+        for (int j = 0; j < 3; ++j) {
+            const int bone = wrist + 1 + f * 3 + j;
+            const float degrees = (f == 0 ? thumbDegrees[j] : fingerDegrees[j]) * pad.fingerCurl[h][f];
+            const QIk4 q = IQMul(g_poseRefLocal[bone].q, IQAxis({0, 0, -1}, degrees * 0.0174532925f));
+            local[j].q = IQBlend(local[j].q, q, weight);
+            space.d[bone] = IkCompose(space.d[PoseParent(mesh, bone)], local[j]);
+        }
+    }
+}
+
 extern "C" void OLUE3_DevGripDump() {
     char l[240];
     sprintf_s(l, "[OLVR][NATIVEGRIP] grip valid=%d live=%d aux=%d: q(%.5f %.5f %.5f %.5f) t(%.3f %.3f %.3f)", g_gripValid, g_gripLive, g_rAux,
@@ -4546,6 +4575,8 @@ static bool PoseApplyVisible(void* comp) {
         {   // [DOORGRIP] a hand holding a door handle
             float dg[2] = { 0.0f, 0.0f };
             OLInteract_HandGrip(dg);
+            if (changed[0] && dg[0] <= 0.0f) TrackedFingers(space, mesh, 0, pad, g_poseRamp[0]);
+            if (changed[1] && dg[1] <= 0.0f && camHold <= 0.0f) TrackedFingers(space, mesh, 1, pad, g_poseRamp[1]);
             if (changed[0] && dg[0] > 0.0f) GripFingers(space, mesh, 0, dg[0]);
             if (changed[1] && dg[1] > 0.0f && camHold <= 0.0f) GripFingers(space, mesh, 1, dg[1]);
         }

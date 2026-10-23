@@ -69,6 +69,9 @@ namespace Outlast1VR
         public const int PageMain = 0, PageSettings = 1, PageControls = 2;
         public const int HitBack = 13, HitRow0 = 100, HitCallout0 = 200;
         static readonly Rectangle BackR = new Rectangle(1064, 96, 156, 34);
+        static readonly Rectangle LayoutR = new Rectangle(800, 96, 244, 34);
+        const int HitLayout = 14;
+        bool indexControls;
 
         int page;
         double pageAt = -10;
@@ -172,8 +175,8 @@ namespace Outlast1VR
                    "While you zoom, the zoomed picture sits in a\ncamcorder viewfinder in front of your eyes."),
                 T_("HANDS", "Motion", "HowToHints", "How-to labels", 1,
                    "Labels in the headset show what to do next.\nEach one stops after you have done it 3 times."),
-                T_("HANDS", "Motion", "QuestPrompts", "Hints name Quest buttons", 1,
-                   "The game's on-screen hints say what to do on the\nQuest 3 controllers instead of showing Xbox\nbuttons."),
+                T_("HANDS", "Motion", "QuestPrompts", "Hints name your buttons", 1,
+                   "The game's hints name your active controller\nbuttons, including Valve Index, instead of Xbox\nbuttons."),
                 T_("HANDS", "Input", "Haptics", "Controller vibration", 1,
                    "The game's rumble in both controllers, plus the\nclicks and buzzes of the hands-on controls."),
                 T_("HANDS", "Motion", "DevMarkers", "Developer markers", 0,
@@ -420,6 +423,7 @@ namespace Outlast1VR
         {
             lastMouse = p;
             if (BackR.Contains(p)) return HitBack;
+            if (page == PageControls && LayoutR.Contains(p)) return HitLayout;
             if (page == PageSettings)
             {
                 List<SetLine> lines = SetLines();
@@ -445,6 +449,7 @@ namespace Outlast1VR
         void PageClick(int hit)
         {
             if (hit == HitBack) { ClosePage(); return; }
+            if (hit == HitLayout) { indexControls = !indexControls; return; }
             if (hit >= HitRow0 && hit < HitRow0 + Defs.Length)
             {
                 int i = hit - HitRow0;
@@ -478,6 +483,7 @@ namespace Outlast1VR
             }
             else if (page == PageControls)
             {
+                if (k == Keys.I) { indexControls = !indexControls; return true; }
                 int cur = CurrentCallout(T);
                 switch (k)
                 {
@@ -499,6 +505,7 @@ namespace Outlast1VR
 
         public void PreviewPage(int p, int sel, double since)
         {
+            if (p == 3) { p = PageControls; indexControls = true; }
             page = p; pageAt = previewT - since;
             if (p == PageSettings) { LoadSettings(); setSel = Math.Max(0, Math.Min(Defs.Length - 1, sel)); setSelTime = previewT - 1.5; EnsureSelVisible(); }
             if (p == PageControls && sel >= 0) { calloutPick = sel % 12; calloutPickAt = previewT - 0.6; }
@@ -510,14 +517,18 @@ namespace Outlast1VR
             double pa = ua * U.Smooth(0.05, 0.40, t - pageAt);
             // the corridor stays behind, darker, so the page reads
             Fill(g, U.A(Color.FromArgb(150, 0, 6, 2), ua), 0, 0, W, H);
-            string tape = page == PageSettings ? "TAPE 02 — VR SETTINGS" : "TAPE 03 — QUEST 3 TOUCH PLUS CONTROLLERS";
-            string head = page == PageSettings ? "VR SETTINGS" : "QUEST 3 CONTROLS";
+            string tape = page == PageSettings ? "TAPE 02 — VR SETTINGS" : indexControls ? "TAPE 03 — VALVE INDEX CONTROLLERS" : "TAPE 03 — QUEST 3 TOUCH PLUS CONTROLLERS";
+            string head = page == PageSettings ? "VR SETTINGS" : indexControls ? "VALVE INDEX CONTROLS" : "QUEST 3 CONTROLS";
             double ts = Math.Max(0, t - pageAt - 0.15);
             int n = Math.Min(tape.Length, (int)(ts * 40));
             Text(g, head, fBtnBig, U.A(Hi, pa), 58, 92, true);
             Text(g, tape.Substring(0, n) + (n < tape.Length || ((int)(t * 2.2)) % 2 == 0 ? "█" : ""), fLabel, U.A(NvMain, pa), 60, 132, true);
             Fill(g, U.A(Color.FromArgb(70, 120, 220, 130), pa), 60, 156, page == PageSettings ? SetListW : 1166, 1);
             DrawBack(g, t, pa);
+            if (page == PageControls) {
+                Fill(g, U.A(Color.FromArgb(150, 12, 45, 20), pa), LayoutR);
+                Text(g, indexControls ? "I: SHOW QUEST" : "I: SHOW INDEX", fStatB, U.A(Hi, pa), LayoutR.X + 15, LayoutR.Y + 6, true);
+            }
             if (page == PageSettings) DrawSettings(g, t, pa);
             else DrawControls(g, t, pa);
             string hint = page == PageSettings ? "↑↓ SELECT    ◄► CHANGE    ENTER TOGGLE    ESC / B BACK    F11 FULL SCREEN" : "◄► STEP THROUGH THE CONTROLS    ESC / B BACK    F11 FULL SCREEN";
@@ -663,8 +674,29 @@ namespace Outlast1VR
         }
 
         // ---------------- the controllers ----------------
+        void DrawIndexControls(Graphics g, double a)
+        {
+            string[,] labels = {
+                { "LEFT HAND", "RIGHT HAND" },
+                { "A: INTERACT / OPEN", "A: JUMP / VAULT" },
+                { "B: RELOAD BATTERY", "B: CROUCH / DROP" },
+                { "STICK: WALK / CLICK TO SPRINT", "STICK: TURN / UP-DOWN TO ZOOM" },
+                { "TRIGGER: LEAN / LOOK BACK", "STICK CLICK: NIGHT VISION" },
+                { "CLOSE HAND: SPRINT / GRAB", "CLOSE HAND: CAMCORDER / GRAB" },
+                { "TRACKPAD PRESS: PAUSE", "TRIGGER: LEAN / LOOK BACK" }
+            };
+            for (int side = 0; side < 2; ++side)
+                for (int row = 0; row < 7; ++row)
+                    Text(g, labels[row, side], row == 0 ? fBtnBig : fStatB,
+                         U.A(row == 0 ? Hi : NvMain, a), 70 + side * 590, 178 + row * 48, true);
+            Text(g, "LEFT GRIP + LEFT TRACKPAD: VR SETTINGS     BOTH STICK CLICKS: RECENTER", fStatB, U.A(Hi, a), 70, 538, true);
+            Text(g, "Open your hand to release. Left grip + left A: recordings; + left B: documents; + right B: notebook.", fHint, U.A(NvMain, a), 70, 585, false);
+            Text(g, "Finger animation uses runtime hand tracking when available. System buttons open SteamVR.", fHint, U.A(NvMain, a), 70, 615, false);
+        }
+
         void DrawControls(Graphics g, double t, double a)
         {
+            if (indexControls) { DrawIndexControls(g, a); return; }
             double since = t - pageAt;
             int cur = CurrentCallout(t);
             PointF[][] pts = new PointF[2][];
